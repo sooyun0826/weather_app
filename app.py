@@ -1082,7 +1082,7 @@ with tab_calendar:
     if CALENDAR_AVAILABLE:
         calendar_options = {
             "initialView": "dayGridMonth",
-            "headerToolbar": {"left": "prev,next today", "center": "title", "right": "dayGridMonth,timeGridWeek,listWeek"},
+            "headerToolbar": {"left": "prev,next today", "center": "title", "right": "dayGridMonth"},
             "selectable": True,
             "editable": False,
             "navLinks": True,
@@ -1097,6 +1097,7 @@ with tab_calendar:
             if st.session_state.get("debug_mode"):
                 st.exception(exc)
             state = None
+        render_failed = not isinstance(state, dict)
 
         if isinstance(state, dict) and state.get("callback") == "eventClick" and state.get("eventClick"):
             ev = state["eventClick"].get("event") or {}
@@ -1119,7 +1120,8 @@ with tab_calendar:
             elif typ == "mission":
                 st.write(f"- 미션 날짜: **{props.get('day') or day_clicked}**")
                 st.write(f"- 습관 키: **{props.get('habit_key')}**")
-        elif state is None:
+        if render_failed:
+            st.warning("달력 컴포넌트를 표시하지 못해 날짜 선택 UI로 대체합니다.")
             picked = st.date_input("날짜 선택", value=today)
             rec = load_checkin(conn, picked.isoformat())
             st.write(rec or "기록 없음")
