@@ -1,14 +1,13 @@
 # app.py
 # -*- coding: utf-8 -*-
 """
-AI 습관 트래커 (달력 + SQLite + 멀티 API + AI 코치)
-- Streamlit
-- SQLite 영속 저장 (session_state 의존 X)
-- 달력 UI: streamlit-calendar (없으면 자동 폴백)
-- 외부 API: OpenWeatherMap(날씨+대기질+일출/일몰), Dog CEO(강아지), Quotable(명언, 키 없음)
-- OpenAI: gpt-5-mini로 코치 리포트 + 내일 미션(캘린더 이벤트) 생성
+AI 습관 트래커 (달력 + SQLite + 멀티 API + AI 코치) — 강화판
+✅ 개선 사항 (요청 반영)
+- 도시를 OpenWeatherMap 안정형 쿼리 "Seoul,KR" 형태로 변경
+- 날씨 실패 시 원인(status/message)을 "예쁜 카드"로 표시
+- API Key 입력 후 "정상 동작 확인" UI 추가 (연결 테스트/상태 표시/캐시 새로고침)
 
-필수 requirements 예시(= Streamlit Cloud에 필요):
+필수 requirements 예시(= Streamlit Cloud):
 streamlit
 pandas
 requests
@@ -37,8 +36,7 @@ except Exception:
 
 CALENDAR_AVAILABLE = True
 try:
-    # pip install streamlit-calendar
-    from streamlit_calendar import calendar
+    from streamlit_calendar import calendar  # pip install streamlit-calendar
 except Exception:
     CALENDAR_AVAILABLE = False
 
@@ -48,7 +46,33 @@ except Exception:
 # =========================
 st.set_page_config(page_title="AI 습관 트래커", page_icon="📊", layout="wide")
 st.title("📊 AI 습관 트래커")
-st.caption("체크인 → 자동 컨텍스트(날씨/대기질/일출) → 기록(달력) → 통계 → AI 코치가 내일 미션까지 설계 🧠📅")
+st.caption("체크인 → 컨텍스트(날씨/대기질/일출) → 기록(달력) → 통계 → AI 코치가 내일 미션까지 설계 🧠📅")
+
+
+# =========================
+# UI helpers
+# =========================
+def status_card(title: str, ok: bool, lines: List[str], kind: str = "info") -> None:
+    """
+    예쁜(그리고 읽기 쉬운) 상태 카드.
+    - ok=True: success 스타일
+    - ok=False: error 스타일
+    """
+    with st.container(border=True):
+        head = f"✅ {title}" if ok else f"⚠️ {title}"
+        st.markdown(f"**{head}**")
+        for ln in lines:
+            st.write(ln)
+        if not ok and kind == "error":
+            st.caption("원인 메시지는 API 응답을 그대로 보여줍니다(키/권한/요금제/도시명/호출 제한 확인).")
+
+
+def short_json(obj: Any, max_len: int = 600) -> str:
+    try:
+        s = json.dumps(obj, ensure_ascii=False, indent=2)
+        return s if len(s) <= max_len else (s[:max_len] + "\n... (truncated)")
+    except Exception:
+        return str(obj)
 
 
 # =========================
@@ -73,8 +97,19 @@ with st.sidebar:
 
     st.divider()
     st.subheader("🧭 앱 옵션")
-    db_path = st.text_input("DB 파일 경로", value="habit_tracker.db", help="로컬/클라우드 모두 기본값으로 동작하도록 설계.")
-    debug = st.toggle("디버그 모드", value=False, help="API 실패 원인을 화면에 조금 더 보여줍니다.")
+    db_path = st.text_input("DB 파일 경로", value="habit_tracker.db")
+    debug = st.toggle("디버그 모드", value=False, help="실패 시 원인/응답을 더 보여줍니다.")
+
+    # 디버그 플래그를 session_state에 넣어 API 함수에서도 접근 가능하게
+    st.session_state["debug_mode"] = debug
+
+    # 캐시 새로고침 버튼 (API 실패가 캐시되어 고정되는 문제 완화)
+    if st.button("🔄 API 캐시 새로고침", use_container_width=True):
+        try:
+            st.cache_data.clear()
+            st.success("캐시를 지웠어요. 다시 시도해보세요!")
+        except Exception:
+            st.warning("캐시 초기화에 실패했어요(환경에 따라 제한될 수 있어요).")
 
 
 # =========================
@@ -88,17 +123,18 @@ HABITS = [
     ("😴 수면", "sleep"),
 ]
 
+# ✅ 도시를 "City,KR" 쿼리로 안정화 (표시명, OWM 쿼리)
 CITIES = [
-    ("Seoul", 37.5665, 126.9780),
-    ("Busan", 35.1796, 129.0756),
-    ("Incheon", 37.4563, 126.7052),
-    ("Daegu", 35.8722, 128.6025),
-    ("Daejeon", 36.3504, 127.3845),
-    ("Gwangju", 35.1595, 126.8526),
-    ("Suwon", 37.2636, 127.0286),
-    ("Ulsan", 35.5384, 129.3114),
-    ("Sejong", 36.4800, 127.2890),
-    ("Jeju", 33.4996, 126.5312),
+    ("서울 (Seoul)", "Seoul,KR"),
+    ("부산 (Busan)", "Busan,KR"),
+    ("인천 (Incheon)", "Incheon,KR"),
+    ("대구 (Daegu)", "Daegu,KR"),
+    ("대전 (Daejeon)", "Daejeon,KR"),
+    ("광주 (Gwangju)", "Gwangju,KR"),
+    ("수원 (Suwon)", "Suwon,KR"),
+    ("울산 (Ulsan)", "Ulsan,KR"),
+    ("세종 (Sejong)", "Sejong,KR"),
+    ("제주 (Jeju City)", "Jeju City,KR"),
 ]
 
 COACH_STYLES = ["스파르타 코치", "따뜻한 멘토", "게임 마스터"]
@@ -142,6 +178,7 @@ REPORT_CONTRACT = """
 - duration_min은 5~60 사이의 정수.
 """
 
+
 # =========================
 # SQLite (Persistence)
 # =========================
@@ -162,7 +199,7 @@ def db_init(conn: sqlite3.Connection) -> None:
           mood INTEGER,
           habits_json TEXT,                     -- {"wake": true, ...}
           notes TEXT,
-          weather_json TEXT,                    -- weather payload (compact)
+          weather_json TEXT,                    -- compact weather payload
           air_json TEXT,                        -- air quality payload
           dog_json TEXT,                        -- dog payload
           quote_json TEXT,                      -- quote payload
@@ -259,8 +296,13 @@ def replace_missions(conn: sqlite3.Connection, day: str, missions: List[Dict[str
 
 
 def load_checkin(conn: sqlite3.Connection, day: str) -> Optional[Dict[str, Any]]:
-    cur = conn.execute("SELECT day, city, coach_style, mood, habits_json, notes, weather_json, air_json, dog_json, quote_json, report_json FROM checkins WHERE day=?",
-                       (day,))
+    cur = conn.execute(
+        """
+        SELECT day, city, coach_style, mood, habits_json, notes, weather_json, air_json, dog_json, quote_json, report_json
+        FROM checkins WHERE day=?
+        """,
+        (day,),
+    )
     row = cur.fetchone()
     if not row:
         return None
@@ -327,9 +369,6 @@ def load_missions(conn: sqlite3.Connection, start_day: str, end_day: str) -> Lis
 
 
 def compute_streak(conn: sqlite3.Connection, until_day: str) -> int:
-    """
-    '기록(체크인)'이 연속으로 존재한 일수(오늘 포함) 스트릭.
-    """
     d = datetime.fromisoformat(until_day).date()
     streak = 0
     while True:
@@ -346,27 +385,63 @@ def compute_streak(conn: sqlite3.Connection, until_day: str) -> int:
 # =========================
 # External APIs (Weather/Air/Sun + Dog + Quote)
 # =========================
-def _safe_get(url: str, params: Optional[Dict[str, Any]] = None, timeout: int = 10) -> Optional[Dict[str, Any]]:
+def safe_get_json(url: str, params: Optional[Dict[str, Any]] = None, timeout: int = 10) -> Tuple[Optional[Dict[str, Any]], Optional[Dict[str, Any]]]:
+    """
+    실패 시 (None, err) 반환.
+    err 예시: {"status": 401, "message": "...", "url": "...", "params": {...}}
+    """
     try:
         r = requests.get(url, params=params, timeout=timeout)
+        content_type = (r.headers.get("content-type") or "").lower()
+
+        # 최대한 JSON으로 파싱 시도
+        data = None
+        if "application/json" in content_type:
+            try:
+                data = r.json()
+            except Exception:
+                data = None
+        else:
+            # text라도 json 파싱 시도
+            try:
+                data = r.json()
+            except Exception:
+                data = None
+
         if r.status_code != 200:
-            return None
-        return r.json()
-    except Exception:
-        return None
+            msg = None
+            if isinstance(data, dict):
+                msg = data.get("message") or data.get("error") or data.get("detail")
+            if not msg:
+                msg = (r.text or "").strip()[:300] or "요청 실패"
+            err = {"status": r.status_code, "message": msg, "url": url, "params": params}
+            return None, err
+
+        if data is None:
+            err = {"status": r.status_code, "message": "JSON 파싱 실패", "url": url, "params": params}
+            return None, err
+
+        return data, None
+
+    except Exception as e:
+        err = {"status": None, "message": f"요청 예외: {repr(e)}", "url": url, "params": params}
+        return None, err
 
 
 @st.cache_data(show_spinner=False, ttl=60 * 15)
-def get_weather_and_sun(city: str, api_key: str) -> Optional[Dict[str, Any]]:
+def get_weather_and_sun(city_query: str, api_key: str) -> Tuple[Optional[Dict[str, Any]], Optional[Dict[str, Any]]]:
     """
     OpenWeatherMap Current Weather: 한국어, 섭씨 + 일출/일몰 포함
+    반환: (weather_compact, err)
     """
     if not api_key:
-        return None
+        return None, {"status": None, "message": "OpenWeatherMap API Key가 비어 있어요.", "url": None, "params": None}
+
     url = "https://api.openweathermap.org/data/2.5/weather"
-    data = _safe_get(url, params={"q": city, "appid": api_key, "units": "metric", "lang": "kr"}, timeout=10)
-    if not data:
-        return None
+    params = {"q": city_query, "appid": api_key, "units": "metric", "lang": "kr"}
+    data, err = safe_get_json(url, params=params, timeout=10)
+    if err or not data:
+        return None, err
 
     weather_desc = (data.get("weather") or [{}])[0].get("description")
     main = data.get("main") or {}
@@ -376,7 +451,6 @@ def get_weather_and_sun(city: str, api_key: str) -> Optional[Dict[str, Any]]:
     sunrise = sys.get("sunrise")
     sunset = sys.get("sunset")
 
-    # UNIX -> local-ish string (서버 환경에 따라 timezone 다를 수 있어 설명용으로만)
     def fmt_unix(ts: Optional[int]) -> Optional[str]:
         if not ts:
             return None
@@ -385,8 +459,9 @@ def get_weather_and_sun(city: str, api_key: str) -> Optional[Dict[str, Any]]:
         except Exception:
             return None
 
-    return {
-        "city": city,
+    compact = {
+        "city_query": city_query,
+        "name": data.get("name"),  # OWM이 인식한 도시명
         "description": weather_desc,
         "temp_c": main.get("temp"),
         "feels_like_c": main.get("feels_like"),
@@ -396,19 +471,24 @@ def get_weather_and_sun(city: str, api_key: str) -> Optional[Dict[str, Any]]:
         "sunset_hhmm": fmt_unix(sunset),
         "coord": data.get("coord"),  # lat/lon for air
     }
+    return compact, None
 
 
 @st.cache_data(show_spinner=False, ttl=60 * 30)
-def get_air_quality(lat: float, lon: float, api_key: str) -> Optional[Dict[str, Any]]:
+def get_air_quality(lat: float, lon: float, api_key: str) -> Tuple[Optional[Dict[str, Any]], Optional[Dict[str, Any]]]:
     """
     OpenWeatherMap Air Pollution API
+    반환: (air_compact, err)
     """
     if not api_key:
-        return None
+        return None, {"status": None, "message": "OpenWeatherMap API Key가 비어 있어요.", "url": None, "params": None}
+
     url = "https://api.openweathermap.org/data/2.5/air_pollution"
-    data = _safe_get(url, params={"lat": lat, "lon": lon, "appid": api_key}, timeout=10)
-    if not data:
-        return None
+    params = {"lat": lat, "lon": lon, "appid": api_key}
+    data, err = safe_get_json(url, params=params, timeout=10)
+    if err or not data:
+        return None, err
+
     item = (data.get("list") or [{}])[0]
     main = item.get("main") or {}
     comp = item.get("components") or {}
@@ -416,7 +496,7 @@ def get_air_quality(lat: float, lon: float, api_key: str) -> Optional[Dict[str, 
     aqi = main.get("aqi")  # 1~5
     aqi_map = {1: "매우 좋음", 2: "좋음", 3: "보통", 4: "나쁨", 5: "매우 나쁨"}
 
-    return {
+    compact = {
         "aqi": aqi,
         "aqi_label": aqi_map.get(aqi, "데이터 없음"),
         "pm2_5": comp.get("pm2_5"),
@@ -424,15 +504,13 @@ def get_air_quality(lat: float, lon: float, api_key: str) -> Optional[Dict[str, 
         "o3": comp.get("o3"),
         "no2": comp.get("no2"),
     }
+    return compact, None
 
 
 @st.cache_data(show_spinner=False, ttl=60 * 60)
 def get_dog_image() -> Optional[Dict[str, Any]]:
-    """
-    Dog CEO 랜덤 이미지 + 품종 추출
-    """
-    data = _safe_get("https://dog.ceo/api/breeds/image/random", timeout=10)
-    if not data or data.get("status") != "success":
+    data, err = safe_get_json("https://dog.ceo/api/breeds/image/random", timeout=10)
+    if err or not data or data.get("status") != "success":
         return None
     url = data.get("message")
     breed = None
@@ -447,11 +525,8 @@ def get_dog_image() -> Optional[Dict[str, Any]]:
 
 @st.cache_data(show_spinner=False, ttl=60 * 60)
 def get_quote() -> Optional[Dict[str, Any]]:
-    """
-    Quotable 랜덤 명언(키 없음)
-    """
-    data = _safe_get("https://api.quotable.io/random", timeout=10)
-    if not data:
+    data, err = safe_get_json("https://api.quotable.io/random", timeout=10)
+    if err or not data:
         return None
     return {"content": data.get("content"), "author": data.get("author")}
 
@@ -471,7 +546,6 @@ def generate_ai_report(
     client = OpenAI(api_key=openai_api_key)
     sys_style = SYSTEM_PROMPTS.get(coach_style, SYSTEM_PROMPTS["따뜻한 멘토"])
 
-    # Responses API 우선 -> 실패 시 chat.completions 폴백
     try:
         resp = client.responses.create(
             model="gpt-5-mini",
@@ -530,6 +604,54 @@ def aqi_exercise_hint(aqi: Optional[int]) -> str:
 
 
 # =========================
+# API Key Verification UI (Sidebar-like inline in main)
+# =========================
+def test_openweather_key(api_key: str) -> Tuple[bool, List[str]]:
+    if not api_key:
+        return False, ["- OpenWeatherMap 키가 비어 있어요."]
+    w, err = get_weather_and_sun("Seoul,KR", api_key)
+    if err or not w:
+        lines = [
+            "- OpenWeatherMap 호출 실패",
+            f"- status: `{err.get('status')}`" if err else "- status: `unknown`",
+            f"- message: {err.get('message')}" if err else "- message: unknown",
+            "- tip: 키가 막 생성된 경우 활성화까지 시간이 걸릴 수 있어요.",
+        ]
+        return False, lines
+    return True, [
+        "- 연결 성공 🎉",
+        f"- 인식된 도시: **{w.get('name')}** (query: `{w.get('city_query')}`)",
+        f"- 예시: {w.get('description')} / {w.get('temp_c')}℃",
+    ]
+
+
+def test_openai_key(api_key: str) -> Tuple[bool, List[str]]:
+    if not api_key:
+        return False, ["- OpenAI 키가 비어 있어요."]
+    if not OPENAI_AVAILABLE:
+        return False, ["- `openai` 패키지가 설치되어 있지 않아요. requirements.txt에 `openai>=1.0.0` 추가 필요."]
+    # 비용/속도 최소화를 위해 아주 짧은 호출
+    try:
+        client = OpenAI(api_key=api_key)
+        resp = client.responses.create(
+            model="gpt-5-mini",
+            input=[{"role": "user", "content": "ping"}],
+        )
+        txt = getattr(resp, "output_text", "") or ""
+        return True, [
+            "- 연결 성공 🎉",
+            f"- 모델: `gpt-5-mini`",
+            f"- 응답 샘플: {txt[:60].strip() or '(빈 응답)'}",
+        ]
+    except Exception as e:
+        return False, [
+            "- OpenAI 호출 실패",
+            f"- message: {repr(e)}",
+            "- tip: 키 권한/모델 접근/네트워크를 확인하세요.",
+        ]
+
+
+# =========================
 # App Boot: DB init
 # =========================
 conn = db_connect(db_path)
@@ -538,13 +660,13 @@ db_init(conn)
 today = date.today()
 today_s = today.isoformat()
 
-# default load today's record (if exists)
 existing_today = load_checkin(conn, today_s)
-default_city = existing_today["city"] if existing_today and existing_today.get("city") else "Seoul"
+default_city = existing_today["city"] if existing_today and existing_today.get("city") else "서울 (Seoul)"
 default_style = existing_today["coach_style"] if existing_today and existing_today.get("coach_style") else "따뜻한 멘토"
 default_mood = int(existing_today["mood"]) if existing_today and existing_today.get("mood") is not None else 6
 default_notes = existing_today["notes"] if existing_today and existing_today.get("notes") else ""
 default_habits = normalize_habits(existing_today["habits_json"]) if existing_today and isinstance(existing_today.get("habits_json"), dict) else {hk: False for _, hk in HABITS}
+
 
 # =========================
 # Top tabs
@@ -556,15 +678,37 @@ tab_checkin, tab_calendar, tab_stats = st.tabs(["✅ 체크인", "📅 달력", 
 # Tab 1: Check-in
 # =========================
 with tab_checkin:
+    # --- API 상태(사용자가 키가 맞는지 바로 확인할 수 있게) ---
+    with st.expander("🔌 API 연결 상태 확인", expanded=False):
+        colA, colB = st.columns(2, gap="large")
+
+        with colA:
+            st.markdown("#### 🌤️ OpenWeatherMap")
+            if st.button("OpenWeatherMap 연결 테스트", use_container_width=True):
+                ok, lines = test_openweather_key(weather_key)
+                status_card("OpenWeatherMap", ok, lines, kind="error" if not ok else "info")
+            else:
+                # 항상 보이는 요약 배지
+                ok, _ = test_openweather_key(weather_key) if weather_key else (False, [])
+                st.write("상태:", "🟢 입력됨" if weather_key else "⚫ 미입력")
+                st.caption("버튼을 누르면 실제 호출로 검증합니다.")
+
+        with colB:
+            st.markdown("#### 🧠 OpenAI")
+            if st.button("OpenAI 연결 테스트", use_container_width=True):
+                ok, lines = test_openai_key(openai_key)
+                status_card("OpenAI", ok, lines, kind="error" if not ok else "info")
+            else:
+                st.write("상태:", "🟢 입력됨" if openai_key else "⚫ 미입력")
+                st.caption("버튼을 누르면 실제 호출로 검증합니다.")
+
     col_left, col_right = st.columns([1.05, 0.95], gap="large")
 
     with col_left:
         st.subheader("오늘의 체크인")
 
-        # habits in 2 columns
         c1, c2 = st.columns(2, gap="medium")
         habits: Dict[str, bool] = {}
-
         for i, (label, hk) in enumerate(HABITS):
             target = c1 if i % 2 == 0 else c2
             with target:
@@ -572,9 +716,16 @@ with tab_checkin:
 
         mood = st.slider("😶‍🌫️ 오늘 기분 점수", 1, 10, value=default_mood, key="mood_slider")
 
-        city = st.selectbox("🌍 도시 선택", [c[0] for c in CITIES], index=[c[0] for c in CITIES].index(default_city) if default_city in [c[0] for c in CITIES] else 0)
-        coach_style = st.radio("🎭 코치 스타일", COACH_STYLES, index=COACH_STYLES.index(default_style) if default_style in COACH_STYLES else 1, horizontal=True)
+        # 도시: 표시명 선택 → query로 변환
+        city_display_list = [c[0] for c in CITIES]
+        city_display = st.selectbox(
+            "🌍 도시 선택",
+            city_display_list,
+            index=city_display_list.index(default_city) if default_city in city_display_list else 0,
+        )
+        city_query = dict(CITIES).get(city_display, "Seoul,KR")
 
+        coach_style = st.radio("🎭 코치 스타일", COACH_STYLES, index=COACH_STYLES.index(default_style) if default_style in COACH_STYLES else 1, horizontal=True)
         notes = st.text_area("📝 메모(선택)", value=default_notes, placeholder="예: 오후에 집중이 잘 안 됐음 / 물을 더 마셔야 함", height=90)
 
         done, total, achievement = habits_summary(habits)
@@ -585,28 +736,24 @@ with tab_checkin:
         m3.metric("기분", f"{mood}/10")
         m4.metric("연속 기록(스트릭)", f"{compute_streak(conn, today_s)}일")
 
-        st.caption("💡 체크인 저장은 '기록'의 본체입니다. 리포트는 그 위에 올라가는 보너스.")
         save_btn = st.button("💾 오늘 체크인 저장", use_container_width=True)
-
         if save_btn:
-            # (1) Weather + Air + Sun
-            w = get_weather_and_sun(city, weather_key)
-            air = None
-            if w and isinstance(w.get("coord"), dict):
+            # Weather + Air + Sun
+            w, w_err = get_weather_and_sun(city_query, weather_key) if weather_key else (None, None)
+            air, air_err = (None, None)
+            if w and isinstance(w.get("coord"), dict) and weather_key:
                 lat = w["coord"].get("lat")
                 lon = w["coord"].get("lon")
                 if lat is not None and lon is not None:
-                    air = get_air_quality(float(lat), float(lon), weather_key)
+                    air, air_err = get_air_quality(float(lat), float(lon), weather_key)
 
-            # (2) Dog + Quote
             dog = get_dog_image()
             quote = get_quote()
 
-            # Save (no report yet)
             upsert_checkin(
                 conn,
                 day=today_s,
-                city=city,
+                city=city_display,  # 표시명 저장
                 coach_style=coach_style,
                 mood=mood,
                 habits=habits,
@@ -619,18 +766,27 @@ with tab_checkin:
             )
             st.success("오늘 체크인을 저장했어요! 이제 달력/통계에 반영됩니다. 📅")
 
+            if debug and (w_err or air_err):
+                st.warning("디버그: API 오류 상세")
+                if w_err:
+                    st.code(short_json(w_err), language="json")
+                if air_err:
+                    st.code(short_json(air_err), language="json")
+
     with col_right:
         st.subheader("컨텍스트 카드 (자동)")
-        st.caption("날씨/대기질/강아지/명언은 체크인과 결합되어 AI가 '행동'으로 바꾸는 재료가 됩니다.")
 
-        # preview cards (use cached live fetch)
-        w_preview = get_weather_and_sun(city, weather_key) if weather_key else None
-        air_preview = None
+        # --- Weather Card (원인 메시지 예쁘게) ---
+        w_preview, w_err = (None, None)
+        if weather_key:
+            w_preview, w_err = get_weather_and_sun(city_query, weather_key)
+
+        air_preview, air_err = (None, None)
         if w_preview and isinstance(w_preview.get("coord"), dict) and weather_key:
             lat = w_preview["coord"].get("lat")
             lon = w_preview["coord"].get("lon")
             if lat is not None and lon is not None:
-                air_preview = get_air_quality(float(lat), float(lon), weather_key)
+                air_preview, air_err = get_air_quality(float(lat), float(lon), weather_key)
 
         dog_preview = get_dog_image()
         quote_preview = get_quote()
@@ -640,62 +796,102 @@ with tab_checkin:
         with card1:
             st.markdown("#### 🌤️ 날씨")
             if not weather_key:
-                st.info("사이드바에 OpenWeatherMap API Key를 넣으면 날씨/대기질이 활성화됩니다.")
+                status_card(
+                    "날씨 비활성화",
+                    False,
+                    ["- 사이드바에 OpenWeatherMap API Key를 입력하면 날씨/대기질이 활성화됩니다."],
+                    kind="error",
+                )
             elif not w_preview:
-                st.warning("날씨 데이터를 가져오지 못했어요. (도시/키/네트워크 확인)")
+                # ✅ 실패 원인 카드
+                lines = [
+                    f"- 요청 도시(query): `{city_query}`",
+                    f"- HTTP status: `{(w_err or {}).get('status')}`",
+                    f"- message: {(w_err or {}).get('message')}",
+                ]
+                status_card("날씨 데이터를 가져오지 못했어요", False, lines, kind="error")
                 if debug:
-                    st.write({"city": city})
+                    st.code(short_json(w_err), language="json")
             else:
-                st.write(f"- **도시:** {w_preview.get('city')}")
-                st.write(f"- **상태:** {w_preview.get('description')}")
-                st.write(f"- **기온/체감:** {w_preview.get('temp_c')}℃ / {w_preview.get('feels_like_c')}℃")
-                st.write(f"- **습도/바람:** {w_preview.get('humidity')}% / {w_preview.get('wind_mps')} m/s")
-                st.write(f"- **일출/일몰:** {w_preview.get('sunrise_hhmm')} / {w_preview.get('sunset_hhmm')}")
+                status_card(
+                    "날씨 연결 정상",
+                    True,
+                    [
+                        f"- 도시(인식): **{w_preview.get('name')}**",
+                        f"- 상태: {w_preview.get('description')}",
+                        f"- 기온/체감: {w_preview.get('temp_c')}℃ / {w_preview.get('feels_like_c')}℃",
+                        f"- 습도/바람: {w_preview.get('humidity')}% / {w_preview.get('wind_mps')} m/s",
+                        f"- 일출/일몰: {w_preview.get('sunrise_hhmm')} / {w_preview.get('sunset_hhmm')}",
+                    ],
+                )
 
                 st.markdown("#### 🌫️ 대기질")
                 if not air_preview:
-                    st.write("대기질 데이터 없음")
+                    if air_err and debug:
+                        status_card(
+                            "대기질 데이터를 가져오지 못했어요",
+                            False,
+                            [
+                                f"- status: `{air_err.get('status')}`",
+                                f"- message: {air_err.get('message')}",
+                            ],
+                            kind="error",
+                        )
+                        st.code(short_json(air_err), language="json")
+                    else:
+                        status_card("대기질", False, ["- 대기질 데이터 없음(일시적/권한/호출 제한 가능)"], kind="error")
                 else:
-                    st.write(f"- **AQI:** {air_preview.get('aqi')} ({air_preview.get('aqi_label')})")
-                    st.write(f"- **PM2.5 / PM10:** {air_preview.get('pm2_5')} / {air_preview.get('pm10')}")
-                    st.caption(aqi_exercise_hint(air_preview.get("aqi")))
+                    status_card(
+                        "대기질 연결 정상",
+                        True,
+                        [
+                            f"- AQI: {air_preview.get('aqi')} ({air_preview.get('aqi_label')})",
+                            f"- PM2.5 / PM10: {air_preview.get('pm2_5')} / {air_preview.get('pm10')}",
+                            f"- 힌트: {aqi_exercise_hint(air_preview.get('aqi'))}",
+                        ],
+                    )
 
         with card2:
             st.markdown("#### 🐶 강아지 부스터")
             if dog_preview:
-                st.write(f"- **품종:** {dog_preview.get('breed')}")
+                status_card("강아지 소환 성공", True, [f"- 품종: **{dog_preview.get('breed')}**"])
                 st.image(dog_preview.get("image_url"), use_container_width=True)
             else:
-                st.write("강아지 데이터 없음")
+                status_card("강아지 소환 실패", False, ["- Dog CEO API 응답 실패(일시적일 수 있어요)."], kind="error")
 
             st.markdown("#### ✨ 오늘의 한 줄 명언")
             if quote_preview and quote_preview.get("content"):
-                st.write(f"“{quote_preview.get('content')}”")
-                st.caption(f"- {quote_preview.get('author')}")
+                status_card("명언 가져오기 성공", True, [f"“{quote_preview.get('content')}”", f"- {quote_preview.get('author')}"])
             else:
-                st.write("명언 데이터 없음")
+                status_card("명언 가져오기 실패", False, ["- Quotable API 응답 실패(일시적일 수 있어요)."], kind="error")
 
         st.divider()
-
         st.subheader("🧾 AI 코치 리포트 생성")
+
         if not OPENAI_AVAILABLE:
-            st.error("openai 패키지가 설치되어 있지 않습니다. requirements.txt에 `openai>=1.0.0`를 추가하세요.")
+            status_card(
+                "OpenAI 비활성화",
+                False,
+                ["- `openai` 패키지가 설치되어 있지 않습니다.", "- requirements.txt에 `openai>=1.0.0` 추가하세요."],
+                kind="error",
+            )
+
         gen = st.button("⚡ 컨디션 리포트 생성 + 내일 미션(달력 등록)", type="primary", use_container_width=True)
 
         if gen:
-            # Ensure today's record exists (save first with freshest context)
-            w = get_weather_and_sun(city, weather_key) if weather_key else None
-            air = None
+            # 오늘 체크인 저장(최신 컨텍스트 포함) 후 리포트
+            w, w_err2 = get_weather_and_sun(city_query, weather_key) if weather_key else (None, None)
+            air, air_err2 = (None, None)
             if w and isinstance(w.get("coord"), dict) and weather_key:
                 lat = w["coord"].get("lat")
                 lon = w["coord"].get("lon")
                 if lat is not None and lon is not None:
-                    air = get_air_quality(float(lat), float(lon), weather_key)
+                    air, air_err2 = get_air_quality(float(lat), float(lon), weather_key)
 
             dog = get_dog_image()
             quote = get_quote()
 
-            # Load last 7 days summary to feed AI (pattern!)
+            # 7일 요약
             start7 = (today - timedelta(days=6)).isoformat()
             df7 = load_range(conn, start7, today_s)
             week_summary = df7.to_dict(orient="records") if not df7.empty else []
@@ -707,7 +903,7 @@ with tab_checkin:
                 "habits": habits,
                 "habit_labels": {hk: label for label, hk in HABITS},
                 "notes": notes or "",
-                "city": city,
+                "city": city_display,
                 "weather": w or "데이터 없음",
                 "air_quality": air or "데이터 없음",
                 "dog": dog or "데이터 없음",
@@ -724,15 +920,27 @@ with tab_checkin:
                 report = generate_ai_report(openai_api_key=openai_key, coach_style=coach_style, payload=payload)
 
             if not report:
-                st.error("리포트 생성 실패: OpenAI Key/모델 접근/네트워크를 확인해 주세요.")
+                status_card(
+                    "리포트 생성 실패",
+                    False,
+                    [
+                        "- OpenAI Key/모델 접근/네트워크를 확인해 주세요.",
+                        "- (팁) 상단의 'API 연결 상태 확인'에서 OpenAI 연결 테스트를 먼저 해보세요.",
+                    ],
+                    kind="error",
+                )
                 if debug:
-                    st.write({"OPENAI_AVAILABLE": OPENAI_AVAILABLE, "coach_style": coach_style})
+                    st.caption("디버그: 날씨/대기질 오류도 함께 확인해보세요.")
+                    if w_err2:
+                        st.code(short_json(w_err2), language="json")
+                    if air_err2:
+                        st.code(short_json(air_err2), language="json")
             else:
-                # Save checkin + report
+                # 체크인 + 리포트 저장
                 upsert_checkin(
                     conn,
                     day=today_s,
-                    city=city,
+                    city=city_display,
                     coach_style=coach_style,
                     mood=mood,
                     habits=habits,
@@ -744,7 +952,7 @@ with tab_checkin:
                     report=report,
                 )
 
-                # Save missions to "tomorrow" (AI contract says tomorrow date)
+                # 내일 미션 저장
                 missions = report.get("tomorrow_missions") or []
                 tomorrow_s = (today + timedelta(days=1)).isoformat()
                 if isinstance(missions, list) and missions:
@@ -752,11 +960,9 @@ with tab_checkin:
 
                 st.success("리포트 생성 완료! 내일 미션은 달력에 자동 등록됩니다. 📅⚔️")
 
-                # Pretty render
                 st.markdown("---")
                 st.markdown("### 🧠 AI 리포트")
-                grade = report.get("condition_grade", "—")
-                st.metric("컨디션 등급", grade)
+                st.metric("컨디션 등급", report.get("condition_grade", "—"))
 
                 ha = report.get("habit_analysis") or {}
                 wins = ha.get("wins") or []
@@ -765,19 +971,13 @@ with tab_checkin:
                 cA, cB = st.columns(2, gap="large")
                 with cA:
                     st.markdown("#### ✅ 잘한 점")
-                    if wins:
-                        for x in wins:
-                            st.write(f"- {x}")
-                    else:
-                        st.write("- 데이터 없음")
+                    for x in wins[:5] or ["데이터 없음"]:
+                        st.write(f"- {x}")
 
                 with cB:
                     st.markdown("#### 🧩 개선 포인트")
-                    if gaps:
-                        for x in gaps:
-                            st.write(f"- {x}")
-                    else:
-                        st.write("- 데이터 없음")
+                    for x in gaps[:5] or ["데이터 없음"]:
+                        st.write(f"- {x}")
 
                 st.markdown("#### 🌦️ 날씨 코멘트")
                 st.write(report.get("weather_comment", "데이터 없음"))
@@ -793,21 +993,22 @@ with tab_checkin:
                 st.markdown("#### 🗣️ 오늘의 한마디")
                 st.write(report.get("one_liner", "—"))
 
-                # Share text
-                st.markdown("### 📋 공유용 텍스트")
+                # 공유용 텍스트
                 done_labels = [label for (label, hk) in HABITS if habits.get(hk)]
                 missed_labels = [label for (label, hk) in HABITS if not habits.get(hk)]
+                done_n, total_n, ach_n = habits_summary(habits)
 
                 share_lines = [
                     f"📊 AI 습관 트래커 ({today_s})",
+                    f"🌍 도시: {city_display}",
                     f"🎭 코치: {coach_style}",
                     f"🙂 기분: {mood}/10",
-                    f"✅ 달성: {done}/{total} ({achievement}%)",
+                    f"✅ 달성: {done_n}/{total_n} ({ach_n}%)",
                     f"✅ 완료: {', '.join(done_labels) if done_labels else '없음'}",
                     f"⬜ 미완료: {', '.join(missed_labels) if missed_labels else '없음'}",
                 ]
                 if w:
-                    share_lines.append(f"🌤️ 날씨: {w.get('city')} / {w.get('description')} / {w.get('temp_c')}℃ (체감 {w.get('feels_like_c')}℃)")
+                    share_lines.append(f"🌤️ 날씨: {w.get('name') or city_display} / {w.get('description')} / {w.get('temp_c')}℃ (체감 {w.get('feels_like_c')}℃)")
                     share_lines.append(f"🌅 일출/일몰: {w.get('sunrise_hhmm')} / {w.get('sunset_hhmm')}")
                 if air:
                     share_lines.append(f"🌫️ 대기질: AQI {air.get('aqi')} ({air.get('aqi_label')})")
@@ -818,19 +1019,21 @@ with tab_checkin:
 
                 share_lines.append("")
                 share_lines.append("🧾 AI 리포트(요약)")
-                share_lines.append(f"[등급] {grade}")
-                if report.get("one_liner"):
-                    share_lines.append(f"[한마디] {report.get('one_liner')}")
+                share_lines.append(f"[등급] {report.get('condition_grade')}")
+                share_lines.append(f"[한마디] {report.get('one_liner')}")
 
+                st.markdown("### 📋 공유용 텍스트")
                 st.code("\n".join(share_lines), language="text")
 
-    with st.expander("🔎 API/의존성 안내 (중요)"):
+    with st.expander("🔎 API/의존성 안내"):
         st.markdown(
             """
-- OpenAI 리포트를 쓰려면 `openai>=1.0.0` 설치가 필요합니다. (코드에서 `from openai import OpenAI` 사용)
-- 달력 UI는 `streamlit-calendar`가 설치되어 있으면 FullCalendar 기반으로 동작합니다. 없으면 앱이 자동으로 폴백 UI를 사용합니다.
-- OpenWeatherMap 키가 없으면 날씨/대기질/일출 정보는 비활성화됩니다(기록은 가능).
-- 외부 API 호출은 모두 timeout=10, 실패 시 None 처리됩니다.
+- OpenWeatherMap은 도시명을 애매하게 주면 실패할 수 있어요. 이 앱은 `Seoul,KR` 같은 국가코드 포함 형태로 안정화했습니다.
+- OpenWeatherMap 실패 원인:
+  - 401: 키 오류/미활성화
+  - 404: 도시 인식 실패(오탈자/표기 문제)
+  - 429: 호출 제한(요금제/레이트리밋)
+- 실패가 캐시될 수 있어요 → 사이드바의 **API 캐시 새로고침**으로 즉시 갱신해보세요.
             """.strip()
         )
 
@@ -841,189 +1044,80 @@ with tab_checkin:
 with tab_calendar:
     st.subheader("📅 달력 (기록 + 내일 미션)")
 
-    # Load a reasonable window (past 45 days ~ next 14 days)
     start_day = (today - timedelta(days=45)).isoformat()
     end_day = (today + timedelta(days=14)).isoformat()
     df = load_range(conn, start_day, end_day)
     missions = load_missions(conn, start_day, end_day)
 
-    # Build calendar events
     events: List[Dict[str, Any]] = []
 
-    # Checkin events (all-day) with "achievement" info
     for _, row in df.iterrows():
         day_s = row["day"]
         ach = int(row["achievement"])
         mood_v = row["mood"]
         title = f"체크인 {ach}% · 기분 {mood_v}/10" if mood_v is not None else f"체크인 {ach}%"
-        # FullCalendar expects ISO date for all-day: start="YYYY-MM-DD"
         events.append({
             "title": title,
             "start": day_s,
             "allDay": True,
-            "extendedProps": {
-                "type": "checkin",
-                "day": day_s,
-                "achievement": ach,
-                "mood": mood_v,
-            },
+            "extendedProps": {"type": "checkin", "day": day_s},
         })
 
-    # Mission events
     for m in missions:
         start_at = m.get("start_at") or (m["day"] + "T09:00")
-        # compute end if possible
         try:
             dt0 = datetime.fromisoformat(start_at)
             dt1 = dt0 + timedelta(minutes=int(m.get("duration_min") or 10))
             end_at = dt1.isoformat(timespec="minutes")
         except Exception:
             end_at = None
-
-        title = f"🎯 {m.get('title')}"
         events.append({
-            "title": title,
+            "title": f"🎯 {m.get('title')}",
             "start": start_at,
             **({"end": end_at} if end_at else {}),
             "allDay": False,
-            "extendedProps": {
-                "type": "mission",
-                "day": m.get("day"),
-                "habit_key": m.get("habit_key"),
-                "success_criteria": m.get("success_criteria"),
-                "source": m.get("source"),
-            },
+            "extendedProps": {"type": "mission", "day": m.get("day"), "habit_key": m.get("habit_key")},
         })
 
-    # Calendar UI
     if CALENDAR_AVAILABLE:
         calendar_options = {
             "initialView": "dayGridMonth",
-            "headerToolbar": {
-                "left": "prev,next today",
-                "center": "title",
-                "right": "dayGridMonth,timeGridWeek,listWeek,multiMonthYear",
-            },
+            "headerToolbar": {"left": "prev,next today", "center": "title", "right": "dayGridMonth,timeGridWeek,listWeek,multiMonthYear"},
             "selectable": True,
             "editable": False,
             "navLinks": True,
-            "weekNumbers": False,
             "dayMaxEvents": True,
             "height": 680,
         }
+        custom_css = ".fc-event { border-radius: 8px; padding: 2px 4px; }"
+        state = calendar(events=events, options=calendar_options, custom_css=custom_css, key="habit_calendar")
 
-        custom_css = """
-        .fc-event { border-radius: 8px; padding: 2px 4px; }
-        .fc .fc-toolbar-title { font-weight: 700; }
-        """
+        if isinstance(state, dict) and state.get("callback") == "eventClick" and state.get("eventClick"):
+            ev = state["eventClick"].get("event") or {}
+            props = ev.get("extendedProps") or {}
+            typ = props.get("type")
+            day_clicked = props.get("day") or (ev.get("start") or "")[:10]
 
-        state = calendar(
-            events=events,
-            options=calendar_options,
-            custom_css=custom_css,
-            key="habit_calendar",
-        )
+            st.markdown("### 🧾 선택한 항목")
+            if typ == "checkin" and day_clicked:
+                rec = load_checkin(conn, day_clicked)
+                if not rec:
+                    st.write("기록 없음")
+                else:
+                    st.write(f"- 날짜: **{day_clicked}**")
+                    st.write(f"- 도시/코치: **{rec.get('city')} / {rec.get('coach_style')}**")
+                    st.write(f"- 기분: **{rec.get('mood')}/10**")
+                    st.write(f"- 메모: {rec.get('notes') or '없음'}")
+                    st.caption("원하면 여기서 편집 UX로 확장할 수 있어요(다음 단계).")
 
-        # Handle clicks
-        if isinstance(state, dict) and state.get("callback"):
-            cb = state.get("callback")
-            st.info(f"달력 이벤트: {cb}")
-
-            # eventClick
-            if cb == "eventClick" and state.get("eventClick"):
-                ev = state["eventClick"].get("event") or {}
-                props = ev.get("extendedProps") or {}
-                typ = props.get("type")
-                day_clicked = props.get("day") or (ev.get("start") or "")[:10]
-
-                if typ == "checkin" and day_clicked:
-                    st.markdown("### 🗂️ 선택한 날짜의 기록")
-                    rec = load_checkin(conn, day_clicked)
-                    if not rec:
-                        st.write("기록 없음")
-                    else:
-                        habits_json = rec.get("habits_json") if isinstance(rec.get("habits_json"), dict) else {}
-                        done, total, ach = habits_summary(habits_json)
-                        st.write(f"- 날짜: **{day_clicked}**")
-                        st.write(f"- 도시/코치: **{rec.get('city')} / {rec.get('coach_style')}**")
-                        st.write(f"- 기분: **{rec.get('mood')}/10**")
-                        st.write(f"- 달성: **{done}/{total} ({ach}%)**")
-                        st.write(f"- 메모: {rec.get('notes') or '없음'}")
-
-                        # Context
-                        w = rec.get("weather_json")
-                        air = rec.get("air_json")
-                        dog = rec.get("dog_json")
-                        quote = rec.get("quote_json")
-
-                        cA, cB = st.columns(2, gap="large")
-                        with cA:
-                            st.markdown("#### 🌤️ 날씨/일출")
-                            if isinstance(w, dict):
-                                st.write(f"- {w.get('description')} / {w.get('temp_c')}℃ (체감 {w.get('feels_like_c')}℃)")
-                                st.write(f"- 일출/일몰: {w.get('sunrise_hhmm')} / {w.get('sunset_hhmm')}")
-                            else:
-                                st.write("데이터 없음")
-
-                            st.markdown("#### 🌫️ 대기질")
-                            if isinstance(air, dict):
-                                st.write(f"- AQI {air.get('aqi')} ({air.get('aqi_label')})")
-                                st.write(f"- PM2.5/PM10: {air.get('pm2_5')} / {air.get('pm10')}")
-                            else:
-                                st.write("데이터 없음")
-
-                        with cB:
-                            st.markdown("#### 🐶 강아지")
-                            if isinstance(dog, dict) and dog.get("image_url"):
-                                st.write(f"- 품종: {dog.get('breed')}")
-                                st.image(dog.get("image_url"), use_container_width=True)
-                            else:
-                                st.write("데이터 없음")
-
-                            st.markdown("#### ✨ 명언")
-                            if isinstance(quote, dict) and quote.get("content"):
-                                st.write(f"“{quote.get('content')}”")
-                                st.caption(f"- {quote.get('author')}")
-                            else:
-                                st.write("데이터 없음")
-
-                        # AI report
-                        rep = rec.get("report_json")
-                        st.markdown("#### 🧠 AI 리포트")
-                        if isinstance(rep, dict):
-                            st.write(f"- 등급: **{rep.get('condition_grade')}**")
-                            st.write(f"- 한마디: {rep.get('one_liner')}")
-                            st.write(rep)
-                        else:
-                            st.write("리포트 없음 (체크인만 저장된 상태일 수 있어요)")
-
-                elif typ == "mission":
-                    st.markdown("### 🎯 선택한 미션")
-                    st.write(f"- 날짜: **{props.get('day') or day_clicked}**")
-                    st.write(f"- 습관 키: **{props.get('habit_key')}**")
-                    st.write(f"- 성공 기준: {props.get('success_criteria') or '없음'}")
-                    st.write(f"- 생성: {props.get('source')}")
-
-            # dateClick (optional): show quick create UI hint
-            if cb == "dateClick" and state.get("dateClick"):
-                d = state["dateClick"].get("date")  # ISO date
-                if d:
-                    st.markdown("### 🧷 날짜 클릭")
-                    st.write(f"선택한 날짜: **{d[:10]}**")
-                    st.caption("해당 날짜로 체크인을 바꾸려면, 상단 '체크인' 탭에서 날짜 선택 기능을 확장해도 좋아요(다음 개선 포인트).")
-
+            elif typ == "mission":
+                st.write(f"- 미션 날짜: **{props.get('day') or day_clicked}**")
+                st.write(f"- 습관 키: **{props.get('habit_key')}**")
     else:
         st.warning("달력 컴포넌트(streamlit-calendar)가 설치되어 있지 않아 폴백 UI로 표시합니다.")
-        # Fallback: simple date picker + records view
         picked = st.date_input("날짜 선택", value=today)
-        picked_s = picked.isoformat()
-        rec = load_checkin(conn, picked_s)
-        if not rec:
-            st.write("기록 없음")
-        else:
-            st.write(rec)
-
-        st.markdown("#### 설치 안내")
+        rec = load_checkin(conn, picked.isoformat())
+        st.write(rec or "기록 없음")
         st.code("pip install streamlit-calendar", language="bash")
 
 
@@ -1038,19 +1132,14 @@ with tab_stats:
     if df7.empty:
         st.info("아직 저장된 체크인이 없어요. '체크인' 탭에서 오늘 기록을 저장해보세요.")
     else:
-        # Chart data
-        df7["date_label"] = df7["day"].apply(lambda x: x[5:])  # MM-DD
-        chart_df = df7.set_index("date_label")[["achievement"]]
-        st.bar_chart(chart_df)
+        df7["date_label"] = df7["day"].apply(lambda x: x[5:])
+        st.bar_chart(df7.set_index("date_label")[["achievement"]])
 
-        # Mood line-ish (Streamlit default line chart)
         mood_df = df7.set_index("date_label")[["mood"]].dropna()
         if not mood_df.empty:
             st.line_chart(mood_df)
 
-        # Habit hit counts
         st.markdown("### 🧮 습관별 달성 횟수(7일)")
-        # Re-load habits per day for accurate count
         cur = conn.execute(
             "SELECT day, habits_json FROM checkins WHERE day BETWEEN ? AND ? ORDER BY day ASC",
             (start7, today_s),
@@ -1066,12 +1155,9 @@ with tab_stats:
                 if h.get(hk):
                     counts[hk] += 1
 
-        habit_count_df = pd.DataFrame(
-            [{"habit": label, "count": counts[hk]} for (label, hk) in HABITS]
-        ).set_index("habit")
+        habit_count_df = pd.DataFrame([{"habit": label, "count": counts[hk]} for (label, hk) in HABITS]).set_index("habit")
         st.bar_chart(habit_count_df)
 
-        # Insights
         st.markdown("### 🧠 자동 인사이트(규칙 기반)")
         avg_ach = int(round(df7["achievement"].mean()))
         avg_mood = float(df7["mood"].dropna().mean()) if df7["mood"].notna().any() else None
@@ -1082,48 +1168,31 @@ with tab_stats:
         if avg_mood is not None:
             st.write(f"- 최근 7일 평균 기분: **{avg_mood:.1f}/10**")
         st.write(f"- 가장 자주 빠진 습관: **{weakest_label}**")
-
-        # Streak
         st.write(f"- 현재 연속 기록(스트릭): **{compute_streak(conn, today_s)}일**")
 
         st.divider()
         st.subheader("🗃️ 데이터 내보내기")
-        export_btn = st.button("CSV로 내보내기", use_container_width=True)
-        if export_btn:
+        if st.button("CSV로 내보내기", use_container_width=True):
             df_all = load_range(conn, "2000-01-01", "2100-01-01")
             csv = df_all.to_csv(index=False).encode("utf-8")
             st.download_button("다운로드", data=csv, file_name="habit_tracker_export.csv", mime="text/csv", use_container_width=True)
-
-    with st.expander("🔧 고급 팁 / 다음 확장 아이디어"):
-        st.markdown(
-            """
-- 체크인 날짜를 '오늘' 고정이 아니라, 달력에서 날짜를 눌러 편집하는 UX로 확장 가능
-- 미션 완료 체크(미션→습관 반영) 흐름을 추가하면 진짜 '게임화'가 됩니다
-- 장기 시계열(30/90/365일) 통계, 요일별 패턴 분석, 월간 리포트 자동 생성도 가능
-            """.strip()
-        )
 
 
 # =========================
 # Footer
 # =========================
 st.divider()
-with st.expander("📌 문제 해결(에러가 날 때)"):
+with st.expander("📌 문제 해결(날씨가 안 뜰 때)"):
     st.markdown(
         """
-**1) ModuleNotFoundError: openai**
-- requirements.txt에 `openai>=1.0.0` 추가하세요. (Streamlit Cloud는 requirements.txt가 설치 기준입니다)
+**가장 흔한 원인**
+- 401: 키가 잘못됐거나 아직 활성화되지 않음(키 생성 직후 몇 분~시간 지연 가능)
+- 404: 도시 인식 실패(이 앱은 `City,KR` 형태로 안정화했지만, 드물게 표기 문제 가능)
+- 429: 호출 제한(무료 플랜/레이트리밋)
 
-**2) 날씨/대기질이 안 나와요**
-- OpenWeatherMap 키가 필요합니다.
-- 키/도시명(영문)/무료 플랜 제한을 확인하세요.
-
-**3) 달력이 안 보여요**
-- `streamlit-calendar` 설치가 필요합니다.
-- 설치가 없으면 앱은 폴백 UI로 동작합니다.
-
-**4) AI 리포트가 실패해요**
-- OpenAI Key, 모델 접근 권한, 네트워크를 확인하세요.
-- 디버그 모드를 켜면 원인 파악이 조금 더 쉬워집니다.
+**해결 루트**
+1) 상단의 **API 연결 상태 확인**에서 OpenWeatherMap 테스트 버튼 클릭 → status/message 확인  
+2) 사이드바의 **API 캐시 새로고침** 클릭 후 다시 시도  
+3) 디버그 모드를 켜면(사이드바) 오류 JSON이 추가로 표시됩니다.
         """.strip()
     )
