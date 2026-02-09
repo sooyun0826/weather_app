@@ -1082,7 +1082,7 @@ with tab_calendar:
     if CALENDAR_AVAILABLE:
         calendar_options = {
             "initialView": "dayGridMonth",
-            "headerToolbar": {"left": "prev,next today", "center": "title", "right": "dayGridMonth,timeGridWeek,listWeek,multiMonthYear"},
+            "headerToolbar": {"left": "prev,next today", "center": "title", "right": "dayGridMonth,timeGridWeek,listWeek"},
             "selectable": True,
             "editable": False,
             "navLinks": True,
@@ -1090,7 +1090,13 @@ with tab_calendar:
             "height": 680,
         }
         custom_css = ".fc-event { border-radius: 8px; padding: 2px 4px; }"
-        state = calendar(events=events, options=calendar_options, custom_css=custom_css, key="habit_calendar")
+        try:
+            state = calendar(events=events, options=calendar_options, custom_css=custom_css, key="habit_calendar")
+        except Exception as exc:
+            st.warning("달력 렌더링 중 오류가 발생해 폴백 UI로 표시합니다.")
+            if st.session_state.get("debug_mode"):
+                st.exception(exc)
+            state = None
 
         if isinstance(state, dict) and state.get("callback") == "eventClick" and state.get("eventClick"):
             ev = state["eventClick"].get("event") or {}
@@ -1113,6 +1119,10 @@ with tab_calendar:
             elif typ == "mission":
                 st.write(f"- 미션 날짜: **{props.get('day') or day_clicked}**")
                 st.write(f"- 습관 키: **{props.get('habit_key')}**")
+        elif state is None:
+            picked = st.date_input("날짜 선택", value=today)
+            rec = load_checkin(conn, picked.isoformat())
+            st.write(rec or "기록 없음")
     else:
         st.warning("달력 컴포넌트(streamlit-calendar)가 설치되어 있지 않아 폴백 UI로 표시합니다.")
         picked = st.date_input("날짜 선택", value=today)
